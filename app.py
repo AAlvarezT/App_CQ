@@ -10,7 +10,7 @@ from scipy.spatial.distance import cdist
 from ortools.constraint_solver import routing_enums_pb2, pywrapcp
 
 # Configuración de página
-st.set_page_config(layout="wide", page_title="Planeador KAM - Febrero 2026")
+st.set_page_config(layout="wide", page_title="Planeador GeoKAM - Febrero 2026")
 
 # --- FUNCIONES DE APOYO ---
 def agregar_poligono_zona(mapa_obj, coords, color):
@@ -79,7 +79,7 @@ def cargar_datos():
 df = cargar_datos()
 
 # --- SIDEBAR (FILTROS) ---
-st.sidebar.header("🎯 Control de Estrategia")
+st.sidebar.header(" Control de Estrategia")
 kam_sel = st.sidebar.selectbox("Seleccionar KAM", sorted(df['kam_final_reasignado'].unique()))
 n_clusters = st.sidebar.slider("Número de Zonas (Días)", 1, 40, 20)
 filtro_etiqueta = st.sidebar.selectbox("Filtrar Etiqueta", ['TODOS'] + sorted(df['etiqueta'].unique().tolist()))
@@ -95,7 +95,7 @@ if buscar_txt:
                 df_f['num_documento'].astype(str).str.contains(buscar_txt, na=False)]
 
 # --- DASHBOARD PRINCIPAL ---
-st.title(f"📍 Rutas KAM: {kam_sel}")
+st.title(f" Rutas KAM: {kam_sel}")
 
 col1, col2 = st.columns([3, 1])
 
@@ -139,7 +139,7 @@ with col1:
         st.error("No se encontraron comercios con los filtros aplicados.")
 
 with col2:
-    st.subheader("📊 Distribución")
+    st.subheader(" Distribución")
     if not df_f.empty:
         conteo = df_f['etiqueta'].value_counts()
         fig, ax = plt.subplots(figsize=(4, 4))
