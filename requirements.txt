@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+folium
+streamlit-folium
+scikit-learn
+scipy
+ortools
+matplotlib
+streamlit-authenticator==0.3.1
