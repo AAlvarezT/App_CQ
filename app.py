@@ -29,6 +29,12 @@ CLUSTER_COLORS = [
     "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#393b79", "#637939"
 ]
 
+# Coordenadas aprox. de Lima Metropolitana (ajustables)
+LIMA_LAT_MIN = -12.50
+LIMA_LAT_MAX = -11.70
+LIMA_LON_MIN = -77.30
+LIMA_LON_MAX = -76.70
+
 
 # ---------------------------
 # HELPERS
@@ -307,6 +313,14 @@ def select_points_for_routing(df_points: pd.DataFrame, max_points: int):
     return tmp, True
 
 
+def filter_lima_coordinates(df_points: pd.DataFrame) -> pd.DataFrame:
+    mask = (
+        df_points["num_latitud"].between(LIMA_LAT_MIN, LIMA_LAT_MAX)
+        & df_points["num_longitud"].between(LIMA_LON_MIN, LIMA_LON_MAX)
+    )
+    return df_points[mask].copy()
+
+
 def draw_cluster_routes(m: folium.Map, df_clustered: pd.DataFrame, speed_kmh: float):
     route_metrics = []
 
@@ -523,6 +537,7 @@ if buscar_txt.strip():
 
 # Controles rutas
 st.sidebar.markdown("### 🧠 Rutas")
+only_lima = st.sidebar.toggle("Solo Lima", value=True)
 n_clusters = st.sidebar.slider("Número de clusters", min_value=1, max_value=12, value=4, step=1)
 speed_kmh = st.sidebar.slider("Velocidad promedio (km/h)", min_value=5, max_value=40, value=int(DEFAULT_SPEED_KMH), step=1)
 
@@ -534,6 +549,9 @@ if "routes_generated" not in st.session_state:
 
 if st.sidebar.button("🚀 Generar rutas", use_container_width=True):
     st.session_state["routes_generated"] = True
+
+if st.sidebar.button("🧹 Reset rutas", use_container_width=True):
+    st.session_state["routes_generated"] = False
 
 generate = bool(st.session_state.get("routes_generated", False))
 
@@ -554,15 +572,28 @@ with st.expander("Ver tabla (preview)"):
     show_cols = [c for c in show_cols if c in df_f.columns]
     st.dataframe(df_f[show_cols].head(200), use_container_width=True)
 
-# Recorte por performance
-df_work, was_trimmed = select_points_for_routing(df_f, max_points)
+# Scope de ruteo: Lima o Perú completo según switch
+df_lima = filter_lima_coordinates(df_f)
+if only_lima:
+    df_scope = df_lima.copy()
+    outside_lima = int(len(df_f) - len(df_scope))
+    if outside_lima > 0:
+        st.info(f"Se excluyen {outside_lima} puntos fuera de Lima para generar clusters/rutas.")
+else:
+    df_scope = df_f.copy()
+
+# Recorte por performance (dentro del scope activo)
+df_work, was_trimmed = select_points_for_routing(df_scope, max_points)
 if was_trimmed:
     st.warning(
-        f"Hay {len(df_f)} puntos. Para rendimiento, se usarán {max_points} más cercanos al centro del filtro."
+        f"Hay {len(df_scope)} puntos en el scope activo. Para rendimiento, se usarán {max_points} más cercanos al centro del filtro."
     )
 
 if df_work.empty:
-    st.warning("No hay puntos con estos filtros.")
+    if only_lima:
+        st.warning("No hay puntos en Lima con estos filtros para generar rutas.")
+    else:
+        st.warning("No hay puntos con estos filtros para generar rutas.")
     st.stop()
 
 m = create_map(df_work)
@@ -624,6 +655,8 @@ if route_metrics:
     sidebar_total_time = float(_met["tiempo_opt_min"].fillna(0).sum())
 
 st.sidebar.metric("Total merchants", int(len(df_f)))
+st.sidebar.metric("Merchants en Lima", int(len(df_lima)))
+st.sidebar.metric("Merchants en scope", int(len(df_scope)))
 st.sidebar.metric("Total clusters", int(n_clusters_eff if generate else 0))
 st.sidebar.metric("Total distance (km)", f"{sidebar_total_distance:.2f}")
 st.sidebar.metric("Estimated travel time (min)", f"{sidebar_total_time:.1f}")
