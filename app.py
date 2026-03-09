@@ -6,7 +6,6 @@ import pandas as pd
 import streamlit as st
 
 import folium
-from folium.plugins import MarkerCluster
 from streamlit_folium import st_folium
 
 from sklearn.cluster import KMeans
@@ -24,6 +23,10 @@ st.set_page_config(layout="wide", page_title="GeoKAM — Rutas Optimizada (Marzo
 DEFAULT_SPEED_KMH = 15.0  # "Factor Lima"
 MAX_POINTS_PER_CLUSTER_SOFT = 85  # para no matar OR-Tools / performance
 MAP_TILE = "CartoDB positron"
+CLUSTER_COLORS = [
+    "#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#393b79", "#637939"
+]
 
 
 # ---------------------------
@@ -247,10 +250,113 @@ def make_popup(row: pd.Series) -> str:
     return "<br>".join(parts)
 
 
-def add_route_polyline(m: folium.Map, df_route: pd.DataFrame, name: str):
-    coords = df_route[["num_latitud", "num_longitud"]].to_numpy().tolist()
-    if len(coords) >= 2:
-        folium.PolyLine(coords, weight=4, opacity=0.9, tooltip=name).add_to(m)
+def create_map(df_points: pd.DataFrame) -> folium.Map:
+    center_lat = float(df_points["num_latitud"].mean())
+    center_lon = float(df_points["num_longitud"].mean())
+    return folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles=MAP_TILE)
+
+
+def compute_clusters(df_points: pd.DataFrame, n_clusters: int):
+    coords = df_points[["num_latitud", "num_longitud"]].to_numpy()
+    n_clusters_eff = max(1, min(int(n_clusters), len(coords)))
+
+    out = df_points.copy()
+    if len(coords) == 0:
+        out["cluster_id"] = -1
+        return out, 0
+
+    kmeans = KMeans(n_clusters=n_clusters_eff, random_state=42, n_init="auto")
+    out["cluster_id"] = kmeans.fit_predict(coords)
+    return out, n_clusters_eff
+
+
+def solve_tsp_route(coords: np.ndarray):
+    return solve_tsp_ortools(coords)
+
+
+def select_points_for_routing(df_points: pd.DataFrame, max_points: int):
+    if len(df_points) <= max_points:
+        return df_points.copy(), False
+
+    tmp = df_points.copy()
+    c_lat = float(tmp["num_latitud"].mean())
+    c_lon = float(tmp["num_longitud"].mean())
+
+    tmp["_dist_center"] = np.sqrt((tmp["num_latitud"] - c_lat) ** 2 + (tmp["num_longitud"] - c_lon) ** 2)
+    tmp = tmp.nsmallest(max_points, "_dist_center").drop(columns=["_dist_center"])  # nearest to center
+    return tmp, True
+
+
+def draw_cluster_routes(m: folium.Map, df_clustered: pd.DataFrame, speed_kmh: float):
+    route_metrics = []
+
+    for idx, cid in enumerate(sorted(df_clustered["cluster_id"].unique())):
+        df_c = df_clustered[df_clustered["cluster_id"] == cid].copy()
+        coords_c = df_c[["num_latitud", "num_longitud"]].to_numpy()
+        if len(coords_c) == 0:
+            continue
+
+        order = solve_tsp_route(coords_c)
+        df_route = df_c.iloc[order].reset_index(drop=True)
+        df_route["visit_order"] = np.arange(1, len(df_route) + 1)
+
+        color = CLUSTER_COLORS[idx % len(CLUSTER_COLORS)]
+        route_coords = df_route[["num_latitud", "num_longitud"]].to_numpy().tolist()
+        if len(route_coords) >= 2:
+            folium.PolyLine(
+                route_coords,
+                color=color,
+                weight=4,
+                opacity=0.9,
+                tooltip=f"Ruta Cluster {cid + 1}"
+            ).add_to(m)
+
+        for _, r in df_route.iterrows():
+            popup = (
+                f"<b>{r.get('nbr_comercio', 'S/N')}</b><br>"
+                f"Dirección: {r.get('nbr_direccion_comercio', '')}<br>"
+                f"Cluster: {int(cid) + 1}<br>"
+                f"Orden visita: {int(r.get('visit_order', 0))}<br>"
+                f"GPV: {r.get('gpvabo', '')}<br>"
+                f"NTRX: {r.get('ntrx', '')}"
+            )
+
+            folium.CircleMarker(
+                location=[r["num_latitud"], r["num_longitud"]],
+                radius=7,
+                color=color,
+                fill=True,
+                fill_opacity=0.9,
+                popup=folium.Popup(popup, max_width=420),
+                tooltip=f"{r.get('nbr_comercio', '')}"
+            ).add_to(m)
+
+            folium.Marker(
+                location=[r["num_latitud"], r["num_longitud"]],
+                icon=folium.DivIcon(
+                    html=(
+                        "<div style=\""
+                        "font-size:11px;font-weight:700;color:#111;"
+                        "background:#fff;border:1px solid #333;border-radius:10px;"
+                        "width:18px;height:18px;line-height:18px;text-align:center;"
+                        "\">"
+                        f"{int(r.get('visit_order', 0))}"
+                        "</div>"
+                    )
+                )
+            ).add_to(m)
+
+        dist_opt = route_distance_km(df_route)
+        time_opt = compute_time_minutes(dist_opt, speed_kmh)
+
+        route_metrics.append({
+            "cluster": int(cid) + 1,
+            "puntos": int(len(df_route)),
+            "dist_opt_km": round(dist_opt, 2),
+            "tiempo_opt_min": round(time_opt, 1) if time_opt is not None else None,
+        })
+
+    return route_metrics
 
 
 # ---------------------------
@@ -422,81 +528,35 @@ with st.expander("Ver tabla (preview)"):
     st.dataframe(df_f[show_cols].head(200), use_container_width=True)
 
 # Recorte por performance
-if len(df_f) > max_points:
-    st.warning(f"Hay {len(df_f)} puntos. Para rendimiento, se usarán {max_points} (muestra aleatoria).")
-    df_work = df_f.sample(max_points, random_state=42).copy()
-else:
-    df_work = df_f.copy()
+df_work, was_trimmed = select_points_for_routing(df_f, max_points)
+if was_trimmed:
+    st.warning(
+        f"Hay {len(df_f)} puntos. Para rendimiento, se usarán {max_points} más cercanos al centro del filtro."
+    )
 
 if df_work.empty:
     st.warning("No hay puntos con estos filtros.")
     st.stop()
 
-# Centro mapa
-center_lat = float(df_work["num_latitud"].mean())
-center_lon = float(df_work["num_longitud"].mean())
-
-m = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles=MAP_TILE)
-
-# Markers
-cluster = MarkerCluster(name="Comercios").add_to(m)
-for _, r in df_work.iterrows():
-    folium.Marker(
-        location=[r["num_latitud"], r["num_longitud"]],
-        popup=folium.Popup(make_popup(r), max_width=450),
-        tooltip=f"{r.get('nbr_comercio','')}"
-    ).add_to(cluster)
+m = create_map(df_work)
 
 route_metrics = []
+n_clusters_eff = 0
 
 if generate:
-    # KMeans clustering
-    coords = df_work[["num_latitud", "num_longitud"]].to_numpy()
-    if len(coords) < n_clusters:
-        n_clusters_eff = max(1, len(coords))
-    else:
-        n_clusters_eff = n_clusters
-
-    kmeans = KMeans(n_clusters=n_clusters_eff, random_state=42, n_init="auto")
-    df_work["cluster_id"] = kmeans.fit_predict(coords)
-
-    # Para cada cluster: TSP
-    for cid in sorted(df_work["cluster_id"].unique()):
-        df_c = df_work[df_work["cluster_id"] == cid].copy()
-
-        # si cluster demasiado grande, reducimos (soft)
-        if len(df_c) > MAX_POINTS_PER_CLUSTER_SOFT:
-            df_c = df_c.sample(MAX_POINTS_PER_CLUSTER_SOFT, random_state=cid).copy()
-
-        coords_c = df_c[["num_latitud", "num_longitud"]].to_numpy()
-
-        order = solve_tsp_ortools(coords_c)
-        df_route = df_c.iloc[order].reset_index(drop=True)
-
-        # métricas
-        dist_opt = route_distance_km(df_route)
-        time_opt = compute_time_minutes(dist_opt, speed_kmh)
-
-        dist_base = approx_baseline_distance_km(df_c)
-        time_base = compute_time_minutes(dist_base, speed_kmh)
-
-        savings_km = dist_base - dist_opt
-        savings_min = (time_base - time_opt) if (time_base is not None and time_opt is not None) else None
-
-        route_metrics.append({
-            "cluster": int(cid),
-            "puntos": int(len(df_route)),
-            "dist_opt_km": round(dist_opt, 2),
-            "tiempo_opt_min": round(time_opt, 1) if time_opt is not None else None,
-            "dist_base_km": round(dist_base, 2),
-            "tiempo_base_min": round(time_base, 1) if time_base is not None else None,
-            "ahorro_km": round(savings_km, 2),
-            "ahorro_min": round(savings_min, 1) if savings_min is not None else None,
-        })
-
-        add_route_polyline(m, df_route, name=f"Ruta Cluster {cid}")
-
-    folium.LayerControl().add_to(m)
+    df_clustered, n_clusters_eff = compute_clusters(df_work, n_clusters)
+    route_metrics = draw_cluster_routes(m, df_clustered, speed_kmh)
+else:
+    for _, r in df_work.iterrows():
+        folium.CircleMarker(
+            location=[r["num_latitud"], r["num_longitud"]],
+            radius=5,
+            color="#1f77b4",
+            fill=True,
+            fill_opacity=0.8,
+            popup=folium.Popup(make_popup(r), max_width=450),
+            tooltip=f"{r.get('nbr_comercio', '')}"
+        ).add_to(m)
 
 # Render map
 st.subheader("Mapa")
@@ -508,29 +568,38 @@ if generate and route_metrics:
     met = pd.DataFrame(route_metrics).sort_values("cluster")
 
     total_opt = met["dist_opt_km"].sum()
-    total_base = met["dist_base_km"].sum()
-    total_save = met["ahorro_km"].sum()
-
     total_opt_min = met["tiempo_opt_min"].sum() if met["tiempo_opt_min"].notna().all() else None
-    total_base_min = met["tiempo_base_min"].sum() if met["tiempo_base_min"].notna().all() else None
-    total_save_min = met["ahorro_min"].sum() if met["ahorro_min"].notna().all() else None
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Distancia optimizada (km)", f"{total_opt:.2f}")
-    c2.metric("Distancia baseline (km)", f"{total_base:.2f}")
-    c3.metric("Ahorro estimado (km)", f"{total_save:.2f}")
+    c2.metric("Clusters", f"{n_clusters_eff}")
+    c3.metric("Puntos ruteados", f"{int(met['puntos'].sum())}")
 
     c4, c5, c6 = st.columns(3)
-    if total_opt_min is not None and total_base_min is not None and total_save_min is not None:
+    if total_opt_min is not None:
         c4.metric("Tiempo optimizado (min)", f"{total_opt_min:.1f}")
-        c5.metric("Tiempo baseline (min)", f"{total_base_min:.1f}")
-        c6.metric("Ahorro estimado (min)", f"{total_save_min:.1f}")
+        c5.metric("Velocidad promedio (km/h)", f"{speed_kmh}")
+        c6.metric("Total comercios filtrados", f"{len(df_f)}")
     else:
         c4.info("Tiempo no disponible (revisa velocidad o nulos).")
         c5.info("")
         c6.info("")
 
     st.dataframe(met, use_container_width=True)
+
+# Resumen sidebar de rutas
+st.sidebar.markdown("### 📊 Resumen rutas")
+sidebar_total_distance = 0.0
+sidebar_total_time = 0.0
+if route_metrics:
+    _met = pd.DataFrame(route_metrics)
+    sidebar_total_distance = float(_met["dist_opt_km"].sum())
+    sidebar_total_time = float(_met["tiempo_opt_min"].fillna(0).sum())
+
+st.sidebar.metric("Total merchants", int(len(df_f)))
+st.sidebar.metric("Total clusters", int(n_clusters_eff if generate else 0))
+st.sidebar.metric("Total distance (km)", f"{sidebar_total_distance:.2f}")
+st.sidebar.metric("Estimated travel time (min)", f"{sidebar_total_time:.1f}")
 
 st.sidebar.markdown("---")
 st.sidebar.caption("GeoKAM • Optimización TSP por clusters • Marzo 2026")
