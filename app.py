@@ -10,6 +10,7 @@ from streamlit_folium import st_folium
 
 from sklearn.cluster import KMeans
 from scipy.spatial.distance import cdist
+from scipy.spatial import ConvexHull
 
 from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
@@ -274,6 +275,25 @@ def solve_tsp_route(coords: np.ndarray):
     return solve_tsp_ortools(coords)
 
 
+def add_cluster_hull(m: folium.Map, coords: np.ndarray, color: str):
+    if len(coords) < 3:
+        return
+    try:
+        hull = ConvexHull(coords)
+        hull_coords = coords[hull.vertices].tolist()
+        hull_coords.append(hull_coords[0])
+        folium.Polygon(
+            locations=hull_coords,
+            color=color,
+            weight=1,
+            fill=True,
+            fill_color=color,
+            fill_opacity=0.10,
+        ).add_to(m)
+    except Exception:
+        return
+
+
 def select_points_for_routing(df_points: pd.DataFrame, max_points: int):
     if len(df_points) <= max_points:
         return df_points.copy(), False
@@ -301,6 +321,7 @@ def draw_cluster_routes(m: folium.Map, df_clustered: pd.DataFrame, speed_kmh: fl
         df_route["visit_order"] = np.arange(1, len(df_route) + 1)
 
         color = CLUSTER_COLORS[idx % len(CLUSTER_COLORS)]
+        add_cluster_hull(m, coords_c, color)
         route_coords = df_route[["num_latitud", "num_longitud"]].to_numpy().tolist()
         if len(route_coords) >= 2:
             folium.PolyLine(
@@ -508,7 +529,13 @@ speed_kmh = st.sidebar.slider("Velocidad promedio (km/h)", min_value=5, max_valu
 # performance control
 max_points = st.sidebar.slider("Máx. puntos (para performance)", min_value=50, max_value=400, value=250, step=25)
 
-generate = st.sidebar.button("🚀 Generar rutas", use_container_width=True)
+if "routes_generated" not in st.session_state:
+    st.session_state["routes_generated"] = False
+
+if st.sidebar.button("🚀 Generar rutas", use_container_width=True):
+    st.session_state["routes_generated"] = True
+
+generate = bool(st.session_state.get("routes_generated", False))
 
 # Resumen base
 colA, colB, colC, colD = st.columns(4)
